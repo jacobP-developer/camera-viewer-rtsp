@@ -1,5 +1,21 @@
 # Security Policy
 
+**⚠️ LEGAL WARNING**
+This tool is intended **only** for use on your own network and on
+devices you own or have explicit, written permission to test.
+Unauthorized access to camera systems, network scanning, or credential
+testing is illegal in many jurisdictions.
+By using this tool you accept that it will be used only on your own
+network and for **educational and lab purposes**.
+The authors and contributors assume no liability for misuse or damage
+caused by this software.
+
+### Fix "[!] not approved for use"
+Once you have read this file and agree with the terms:
+
+Open `linux/connect.py` 
+At `line 24` change the variable `APPROVED` = True
+
 ## Supported Versions
 
 We release patches for security vulnerabilities. The following versions are currently supported:
@@ -10,6 +26,21 @@ We release patches for security vulnerabilities. The following versions are curr
 | < 1.0   | :x:                |
 
 
+## Reporting a Vulnerability
+
+**Do not report security vulnerabilities through public GitHub issues.**
+
+Report them privately using:
+
+- GitHub private advisory: https://github.com/jacobP-cyberdev/camera-viewer-rtsp/security/advisories/new
+
+Include:
+
+- Type of issue
+- Full paths of affected source files
+- Steps to reproduce
+- Proof-of-concept if applicable
+- Impact assessment
 
 ## Policy
 

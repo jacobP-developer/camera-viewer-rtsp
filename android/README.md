@@ -30,15 +30,16 @@ Open your Termux terminal app and run the following commands to install Python, 
 
 ```bash
 pkg update && pkg upgrade
-pkg install x11-repo
-pkg install termux-x11-nightly mpv-x python
+pkg install x11-repo -y
+pkg install termux-x11-nightly mpv-x python -y
+pkg install xorg-xdpyinfo -y
 ```
 
 ## Installation
 
 ### 1. Clone the repo
 ```bash
-git clone https://github.com/jacobP-cyberdev/rtsp-camera-viewer.git)
+git clone https://github.com/jacobP-cyberdev/rtsp-camera-viewer.git
 cd rtsp-camera-viewer/android
 ```
 Go to the directory 
@@ -53,4 +54,11 @@ cd rtsp-camera-viewer/android
 ### 3. Run the script
 ```bash
 python3 connect.py
+```
+
+### Help
+If the X11 player is ever showing a black screen, you most likely need to refresh it.
+
+```bash
+
 ```

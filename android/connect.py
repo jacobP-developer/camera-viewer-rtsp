@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-RTSP camera viewer with automatic player backend selection.
+RTSP camera viewer for Android via Termux + Termux:X11 + mpv.
 
-Desktop Linux: uses GStreamer for playback.
-Android / Termux: uses mpv inside Termux:X11 (no root required).
-
-The mode is chosen at runtime. No flags needed.
+Playback flow:
+  1. Start termux-x11 on :0 (kills old sessions first)
+  2. Verify the server answers on the socket
+  3. Launch mpv inside the X11 display
+  4. Read mpv's log to confirm a video output was opened
+  5. If mpv fails to render, try the fallback VO and report the log
 """
 
 import os
 import re
-import select
 import shutil
 import socket
 import subprocess
@@ -19,52 +20,40 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ---------------------------------------------------------------------------
-# Termux environment setup
-# ---------------------------------------------------------------------------
-# XDG_RUNTIME_DIR must point at $PREFIX/tmp so X11 clients can find the
-# abstract socket that termux-x11 creates. Set it before anything else.
+
+# Environment setup
+
 if "com.termux" in os.environ.get("PREFIX", ""):
     _PREFIX = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
     os.environ.setdefault("XDG_RUNTIME_DIR", os.path.join(_PREFIX, "tmp"))
 
-# ---------------------------------------------------------------------------
+
 # Tuning
-# ---------------------------------------------------------------------------
+
 PROBE_WORKERS = 12
 PROBE_TIMEOUT = 2
 STABILITY_GRACE = 6.0
 HARD_FAIL_THRESHOLD = 2.0
-PLAYER_STARTUP_TIMEOUT = 15.0
 RTSP_USER_AGENT = "LIVE555 Streaming Media v2016.11.28"
-RTSP_LATENCY = 500
 X11_DISPLAY = ":0"
 X11_STARTUP_WAIT = 8.0
+MPV_VO_WAIT = 8.0
 
-# ---------------------------------------------------------------------------
+
 # Platform detection
-# ---------------------------------------------------------------------------
+
 IS_TERMUX = "com.termux" in os.environ.get("PREFIX", "")
-IS_LINUX = not IS_TERMUX and sys.platform.startswith("linux")
 
-PLAYER_BACKEND = None
+if not IS_TERMUX:
+    print("[!] This script is built for Termux on Android.")
+    print("[*] Use the Linux version for desktop systems.")
+    sys.exit(1)
 
-
-def detect_backend():
-    global PLAYER_BACKEND
-    if IS_TERMUX:
-        if shutil.which("mpv") and shutil.which("termux-x11"):
-            PLAYER_BACKEND = "x11-mpv"
-            return PLAYER_BACKEND
-        PLAYER_BACKEND = None
-        return None
-    PLAYER_BACKEND = "gstreamer"
-    return "gstreamer"
+PLAYER_BACKEND = "x11-mpv"
 
 
-# ---------------------------------------------------------------------------
 # Priority paths
-# ---------------------------------------------------------------------------
+
 PRIORITY_PATHS = [
     "/?chID=1&streamType=main&linkType=tcp",
     "/chID=1&streamType=main&linkType=tcp",
@@ -75,8 +64,6 @@ PRIORITY_PATHS = [
     "/cam/realmonitor?channel=1&subtype=0",
     "/user=admin_password={password}_channel=1_stream=0.sdp?real_stream",
     "/user=admin_password=admin_channel=1_stream=0.sdp?real_stream",
-    "/user=admin_password={password}_channel=1_stream=0.sdp",
-    "/user=admin_password=admin_channel=1_stream=0.sdp",
     "/11",
     "/axis-media/media.amp",
     "/mpeg/media.amp",
@@ -88,9 +75,9 @@ PRIORITY_PATHS = [
 PRIORITY_WORKERS = 4
 PRIORITY_GRACE = 2.0
 
-# ---------------------------------------------------------------------------
+
 # Vendor -> primary path
-# ---------------------------------------------------------------------------
+
 VENDOR_PATHS = {
     "hipcam":       "/11",
     "xiongmai":     "/user=admin_password={password}_channel=1_stream=0.sdp?real_stream",
@@ -131,9 +118,9 @@ VENDOR_PATHS = {
     "generic":      "/11",
 }
 
-# ---------------------------------------------------------------------------
+
 # Multi-variant paths per vendor
-# ---------------------------------------------------------------------------
+
 VENDOR_PATH_VARIANTS = {
     "h264dvr": [
         "/user=admin_password={password}_channel=1_stream=0.sdp?real_stream",
@@ -295,9 +282,9 @@ VENDOR_KEYWORDS = [
     ("rtprtspflyer", "generic"), ("live555", "generic"),
 ]
 
-# ---------------------------------------------------------------------------
+
 # Validation
-# ---------------------------------------------------------------------------
+
 IP_REGEX = re.compile(
     r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
     r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$"
@@ -308,9 +295,9 @@ def is_valid_ipv4(ip):
     return bool(IP_REGEX.match(ip.strip()))
 
 
-# ---------------------------------------------------------------------------
+
 # Path scoring
-# ---------------------------------------------------------------------------
+
 def _path_score(path):
     p = path.lower()
     score = 0
@@ -337,9 +324,9 @@ def _path_score(path):
     return score
 
 
-# ---------------------------------------------------------------------------
+
 # Probing
-# ---------------------------------------------------------------------------
+
 def _rtsp_exchange(ip, path, timeout=4, extra_headers="", describe=True,
                    teardown=True):
     try:
@@ -621,9 +608,9 @@ def report_mic(ip, verbose=False):
     return path, has_audio, vcodec
 
 
-# ---------------------------------------------------------------------------
+
 # Termux:X11 helpers
-# ---------------------------------------------------------------------------
+
 def _x11_dir():
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if runtime:
@@ -645,6 +632,11 @@ def _x11_env():
     return env
 
 
+def _mpv_log_path():
+    prefix = os.environ.get("PREFIX", "/tmp")
+    return os.path.join(prefix, "tmp", "mpv-camera.log")
+
+
 def _kill_x11():
     try:
         subprocess.run(
@@ -655,7 +647,7 @@ def _kill_x11():
         )
     except Exception:
         pass
-    time.sleep(0.5)
+    time.sleep(0.8)
 
 
 def _clean_x11_sockets():
@@ -670,23 +662,47 @@ def _clean_x11_sockets():
                 pass
 
 
-def _x11_is_running():
+def _x11_pid():
+    """Return PID of the running termux-x11 process, or None."""
     try:
         result = subprocess.run(
             ["pgrep", "-f", "termux-x11"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
+            capture_output=True, text=True, timeout=5,
         )
-        if result.returncode == 0:
-            return True
+        if result.returncode == 0 and result.stdout.strip():
+            return int(result.stdout.strip().split()[0])
     except Exception:
         pass
-    return os.path.exists(_x11_socket_path())
+    return None
+
+
+def _x11_socket_alive():
+    """True if the X server actually answers on the socket."""
+    try:
+        result = subprocess.run(
+            ["xdpyinfo"],
+            env=_x11_env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return os.path.exists(_x11_socket_path())
+    except Exception:
+        return False
+
+
+def _x11_is_running():
+    """True only if the process is alive AND the socket answers."""
+    if _x11_pid() is None:
+        return False
+    return _x11_socket_alive()
 
 
 def _start_x11():
-    if _x11_is_running() and os.path.exists(_x11_socket_path()):
+    # Reuse an already-healthy server
+    if _x11_is_running():
         print(f"[*] Termux:X11 already running on {X11_DISPLAY}.")
         return True
 
@@ -711,18 +727,27 @@ def _start_x11():
         print("    pkg install termux-x11-nightly")
         return False
 
+    # Wait for the socket file to appear
     socket_path = _x11_socket_path()
     deadline = time.time() + X11_STARTUP_WAIT
     while time.time() < deadline:
         if os.path.exists(socket_path):
-            print(f"[+] Termux:X11 ready on {X11_DISPLAY}.")
-            print("[*] Open the Termux:X11 app on your phone to see video.")
-            return True
+            break
         time.sleep(0.3)
+    else:
+        print("[!] Termux:X11 did not come up in time.")
+        print("[*] Open the Termux:X11 app on your phone, then retry.")
+        return False
 
-    print("[!] Termux:X11 did not come up in time.")
-    print("[*] Open the Termux:X11 app manually, then retry.")
-    return False
+    # Verify the server answers, not just that the socket exists
+    if not _x11_socket_alive():
+        print("[!] Termux:X11 socket exists but the server is not responding.")
+        print("[*] Open the Termux:X11 app on your phone and try again.")
+        return False
+
+    print(f"[+] Termux:X11 ready on {X11_DISPLAY}.")
+    print("[*] Open the Termux:X11 app on your phone to see video.")
+    return True
 
 
 def _build_mpv_command(url, gpu=True):
@@ -733,6 +758,7 @@ def _build_mpv_command(url, gpu=True):
         "--no-input-default-bindings",
         "--input-terminal=no",
         "--osc=no",
+        "--msg-level=all=info",
     ]
     if gpu:
         base += ["--vo=gpu", "--gpu-context=x11egl"]
@@ -742,29 +768,39 @@ def _build_mpv_command(url, gpu=True):
     return base
 
 
-# ---------------------------------------------------------------------------
-# External player backends
-# ---------------------------------------------------------------------------
+def _mpv_vo_ready(log_path):
+    """True if the mpv log shows a video output was successfully opened."""
+    try:
+        with open(log_path, "r", errors="ignore") as f:
+            content = f.read()
+    except Exception:
+        return False
+    markers = (
+        "VO: [gpu]",
+        "VO: [x11]",
+        "Using hardware decoding",
+        "Using software decoding",
+    )
+    return any(m in content for m in markers)
+
+
+
+# Player
+
 def ensure_player_available():
-    backend = detect_backend()
-    if backend is None:
-        print("[!] Termux detected, but the required player is not installed.")
-        print("[*] Install everything with:")
-        print("    pkg update")
+    if shutil.which("mpv") is None:
+        print("[!] mpv is not installed.")
+        print("[*] Install with:")
         print("    pkg install x11-repo")
         print("    pkg install termux-x11-nightly")
         print("    pkg install mpv-x")
-        print("[*] Also install the Termux:X11 app on your phone.")
         sys.exit(1)
-    if backend == "gstreamer":
-        if shutil.which("gst-launch-1.0") is None:
-            print("[!] gst-launch-1.0 not found.")
-            print("[*] Install GStreamer:")
-            print("    sudo apt install gstreamer1.0-tools "
-                  "gstreamer1.0-plugins-good gstreamer1.0-plugins-bad "
-                  "gstreamer1.0-plugins-ugly gstreamer1.0-libav")
-            sys.exit(1)
-    return backend
+    if shutil.which("termux-x11") is None:
+        print("[!] termux-x11 is not installed.")
+        print("[*] Install with:")
+        print("    pkg install x11-repo")
+        print("    pkg install termux-x11-nightly")
+        sys.exit(1)
 
 
 def _run_termux_x11_mpv(url):
@@ -772,8 +808,10 @@ def _run_termux_x11_mpv(url):
         return "hardfail", 0.0
 
     env = _x11_env()
+    log_path = _mpv_log_path()
 
     print(f"[*] Launching mpv in Termux:X11 on {X11_DISPLAY}...")
+    print(f"[*] mpv log: {log_path}")
     print("[*] Switch to the Termux:X11 app to watch.")
     print("[*] Press Ctrl+C in this terminal to stop.\n")
 
@@ -784,25 +822,60 @@ def _run_termux_x11_mpv(url):
     ]
 
     for label, cmd in variants:
+        # Truncate the log for this attempt
+        try:
+            log_file = open(log_path, "w")
+        except Exception:
+            log_file = subprocess.DEVNULL
+
         try:
             proc = subprocess.Popen(
                 cmd,
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
             )
         except FileNotFoundError:
             print("[!] mpv not found. Install with:")
             print("    pkg install mpv-x")
+            if hasattr(log_file, "close"):
+                log_file.close()
             return "hardfail", 0.0
 
-        # give mpv time to fail fast if the vo/context is bad
-        time.sleep(2.5)
+        # Wait up to MPV_VO_WAIT for mpv to die or open a VO
+        vo_ready = False
+        deadline = time.time() + MPV_VO_WAIT
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            if _mpv_vo_ready(log_path):
+                vo_ready = True
+                break
+            time.sleep(0.3)
+
         if proc.poll() is not None:
-            print(f"[*] {label} failed to start, trying fallback...")
+            print(f"[*] {label} exited before opening a video output.")
+            print(f"    See {log_path} for details.")
+            if hasattr(log_file, "close"):
+                log_file.close()
             continue
 
+        if not vo_ready:
+            print(f"[*] {label} did not open a video output in "
+                  f"{MPV_VO_WAIT:.0f}s.")
+            print(f"    See {log_path} for details.")
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            if hasattr(log_file, "close"):
+                log_file.close()
+            continue
+
+        # mpv is rendering. Wait for it to finish.
+        print(f"[+] {label} is rendering. Enjoy the stream.")
         try:
             while proc.poll() is None:
                 time.sleep(0.2)
@@ -813,9 +886,14 @@ def _run_termux_x11_mpv(url):
             except subprocess.TimeoutExpired:
                 proc.kill()
             print("\n[*] Stopped.")
+            if hasattr(log_file, "close"):
+                log_file.close()
             return "interrupt", time.time() - start
 
         duration = time.time() - start
+        if hasattr(log_file, "close"):
+            log_file.close()
+
         if proc.returncode == 0:
             return "ok", duration
         if duration < HARD_FAIL_THRESHOLD:
@@ -825,248 +903,9 @@ def _run_termux_x11_mpv(url):
     return "hardfail", time.time() - start
 
 
-def _run_external_player(url, player):
-    if IS_TERMUX:
-        return _run_termux_x11_mpv(url)
 
-    if player == "mpv":
-        cmd = [
-            "mpv",
-            "--no-config",
-            "--rtsp-transport=tcp",
-            "--cache=yes",
-            "--demuxer-max-bytes=4M",
-            url,
-        ]
-    elif player == "ffplay":
-        cmd = [
-            "ffplay",
-            "-rtsp_transport", "tcp",
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-framedrop",
-            "-loglevel", "warning",
-            url,
-        ]
-    else:
-        print(f"[!] Unknown external player: {player}")
-        return "fail", 0.0
+# play() dispatcher
 
-    print(f"[*] Launching {player}...")
-    print("[*] Press Ctrl+C in this terminal to stop playback.\n")
-
-    start = time.time()
-    try:
-        proc = subprocess.Popen(cmd)
-        try:
-            while proc.poll() is None:
-                time.sleep(0.2)
-        except KeyboardInterrupt:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            print("\n[*] Stopped.")
-            return "interrupt", time.time() - start
-
-        duration = time.time() - start
-        if proc.returncode == 0:
-            if duration >= STABILITY_GRACE:
-                return "ok", duration
-            return "fail", duration
-        if duration < HARD_FAIL_THRESHOLD:
-            return "hardfail", duration
-        return "fail", duration
-
-    except FileNotFoundError:
-        print(f"[!] {player} not found in PATH.")
-        return "hardfail", 0.0
-
-
-# ---------------------------------------------------------------------------
-# GStreamer backend (desktop Linux only)
-# ---------------------------------------------------------------------------
-_GST_ELEMENT_CACHE = {}
-
-
-def _has_gst_element(name):
-    if name in _GST_ELEMENT_CACHE:
-        return _GST_ELEMENT_CACHE[name]
-    try:
-        result = subprocess.run(
-            ["gst-inspect-1.0", name],
-            capture_output=True, timeout=5,
-        )
-        found = result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        found = False
-    _GST_ELEMENT_CACHE[name] = found
-    return found
-
-
-def _append_deinterlace(branch):
-    if _has_gst_element("deinterlace"):
-        return branch + ["!", "deinterlace"]
-    return branch
-
-
-def _video_branch_for_codec(vcodec):
-    vc = (vcodec or "").upper()
-    if vc in ("H265", "HEVC"):
-        if _has_gst_element("rtph265depay") and _has_gst_element("avdec_h265"):
-            return _append_deinterlace([
-                "r.", "!", "application/x-rtp,media=video,encoding-name=H265",
-                "!", "rtph265depay", "!", "h265parse", "!", "avdec_h265",
-            ]) + ["!", "videoconvert", "!", "autovideosink", "sync=false"]
-    if vc in ("MP4V", "MP4V-ES"):
-        if _has_gst_element("rtpmp4vdepay") and _has_gst_element("avdec_mpeg4"):
-            return _append_deinterlace([
-                "r.", "!", "application/x-rtp,media=video,encoding-name=MP4V-ES",
-                "!", "rtpmp4vdepay", "!", "avdec_mpeg4",
-            ]) + ["!", "videoconvert", "!", "autovideosink", "sync=false"]
-    if vc == "JPEG":
-        if _has_gst_element("rtpjpegdepay") and _has_gst_element("jpegdec"):
-            return [
-                "r.", "!", "application/x-rtp,media=video,encoding-name=JPEG",
-                "!", "rtpjpegdepay", "!", "jpegdec",
-                "!", "videoconvert", "!", "autovideosink", "sync=false",
-            ]
-    if _has_gst_element("rtph264depay") and _has_gst_element("avdec_h264"):
-        return _append_deinterlace([
-            "r.", "!", "application/x-rtp,media=video,encoding-name=H264",
-            "!", "rtph264depay", "!", "h264parse", "!", "avdec_h264",
-        ]) + ["!", "videoconvert", "!", "autovideosink", "sync=false"]
-    return _append_deinterlace([
-        "r.", "!", "application/x-rtp,media=video",
-        "!", "decodebin",
-    ]) + ["!", "videoconvert", "!", "autovideosink", "sync=false"]
-
-
-def _video_branch_decodebin():
-    return _append_deinterlace([
-        "r.", "!", "application/x-rtp,media=video",
-        "!", "decodebin",
-    ]) + ["!", "videoconvert", "!", "autovideosink", "sync=false"]
-
-
-def _build_pipeline(url, with_audio=True, transport="tcp", vcodec=None,
-                    force_decodebin=False):
-    rtspsrc = [
-        "rtspsrc", f"location={url}",
-        f"latency={RTSP_LATENCY}",
-        f"protocols={transport}",
-        f"user-agent={RTSP_USER_AGENT}",
-        "do-rtsp-keep-alive=true",
-        "do-retransmission=false",
-        "buffer-mode=auto",
-        "timeout=10000000",
-        "ntp-sync=false",
-    ]
-
-    if force_decodebin:
-        video_branch = _video_branch_decodebin()
-    else:
-        video_branch = _video_branch_for_codec(vcodec)
-
-    audio_branch = None
-    if with_audio:
-        if _has_gst_element("rtppcmadepay") and _has_gst_element("alawdec"):
-            audio_branch = [
-                "r.", "!", "application/x-rtp,media=audio,encoding-name=PCMA",
-                "!", "rtppcmadepay", "!", "alawdec",
-                "!", "audioconvert", "!", "audioresample",
-                "!", "autoaudiosink",
-            ]
-        elif _has_gst_element("rtppcmudepay") and _has_gst_element("mulawdec"):
-            audio_branch = [
-                "r.", "!", "application/x-rtp,media=audio,encoding-name=PCMU",
-                "!", "rtppcmudepay", "!", "mulawdec",
-                "!", "audioconvert", "!", "audioresample",
-                "!", "autoaudiosink",
-            ]
-
-    cmd = ["gst-launch-1.0", "-e", *rtspsrc, "name=r", *video_branch]
-    if audio_branch:
-        cmd.extend(audio_branch)
-    return cmd
-
-
-def _run_gstreamer(cmd, label, startup_timeout=PLAYER_STARTUP_TIMEOUT):
-    print(f"[*] Starting: {label}")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError as exc:
-        print(f"[!] {label} not found: {exc}")
-        return ("hardfail", 0.0)
-
-    start = time.time()
-    started_playing = False
-    killed_for_stall = False
-
-    try:
-        while proc.poll() is None:
-            try:
-                ready, _, _ = select.select([proc.stdout], [], [], 0.2)
-            except (OSError, ValueError):
-                ready = []
-
-            if ready:
-                line = proc.stdout.readline()
-                if line:
-                    line = line.rstrip()
-                    print(f"    [{label}] {line}")
-                    if not started_playing and (
-                        "Setting pipeline to PLAYING" in line
-                        or "Pipeline is PLAYING" in line
-                    ):
-                        started_playing = True
-                        print(f"[+] {label} reached PLAYING.")
-
-            if (not started_playing
-                    and time.time() - start > startup_timeout):
-                print(f"[!] {label} stuck for {startup_timeout:.0f}s "
-                      f"before PLAYING, killing.")
-                killed_for_stall = True
-                proc.kill()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    pass
-                break
-    except KeyboardInterrupt:
-        try:
-            proc.terminate()
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        return ("interrupt", time.time() - start)
-
-    duration = time.time() - start
-    returncode = proc.returncode
-
-    if killed_for_stall:
-        return ("hardfail", duration)
-    if returncode != 0:
-        print(f"[!] {label} exited with code {returncode} after "
-              f"{duration:.1f}s")
-        if duration < HARD_FAIL_THRESHOLD:
-            return ("hardfail", duration)
-        return ("fail", duration)
-    if duration >= STABILITY_GRACE:
-        return ("ok", duration)
-    return ("fail", duration)
-
-
-# ---------------------------------------------------------------------------
-# play() dispatches to the correct backend
-# ---------------------------------------------------------------------------
 def play(ip, path, with_audio=True, has_audio=True, vcodec=None):
     url = f"rtsp://{ip}:554{path}"
     print(f"[*] Playing (LIVE): {url}")
@@ -1074,112 +913,22 @@ def play(ip, path, with_audio=True, has_audio=True, vcodec=None):
     print(f"[*] Backend: {PLAYER_BACKEND}")
     print("[*] Press Ctrl+C to stop.\n")
 
-    if PLAYER_BACKEND == "x11-mpv":
-        while True:
-            status, dur = _run_termux_x11_mpv(url)
-            if status == "interrupt":
-                return
-            if status == "ok":
-                print(f"[*] Stream ended after {dur:.1f}s. Reconnecting...")
-                time.sleep(2)
-                continue
-            print(f"[!] Player exited with status {status} after {dur:.1f}s.")
-            print("[!] Returning to menu.")
+    while True:
+        status, dur = _run_termux_x11_mpv(url)
+        if status == "interrupt":
             return
-
-    if PLAYER_BACKEND in ("mpv", "ffplay"):
-        while True:
-            status, dur = _run_external_player(url, PLAYER_BACKEND)
-            if status == "interrupt":
-                return
-            if status == "ok":
-                print(f"[*] Stream dropped after {dur:.1f}s. Reconnecting...")
-                time.sleep(2)
-                continue
-            print(f"[!] Player exited with status {status} after {dur:.1f}s.")
-            print("[!] Returning to menu.")
-            return
-
-    audio_label = " + audio" if (with_audio and has_audio) else ""
-    variants = [
-        (f"GStreamer TCP{audio_label} (codec: {vcodec or 'auto'})",
-         _build_pipeline(url, with_audio and has_audio, "tcp", vcodec)),
-        ("GStreamer TCP video-only (codec: "
-         f"{vcodec or 'auto'})",
-         _build_pipeline(url, False, "tcp", vcodec)),
-        (f"GStreamer TCP{audio_label} (decodebin)",
-         _build_pipeline(url, with_audio and has_audio, "tcp", None, True)),
-        ("GStreamer TCP video-only (decodebin)",
-         _build_pipeline(url, False, "tcp", None, True)),
-        (f"GStreamer UDP{audio_label} (codec: {vcodec or 'auto'})",
-         _build_pipeline(url, with_audio and has_audio, "udp", vcodec)),
-        ("GStreamer UDP video-only (codec: "
-         f"{vcodec or 'auto'})",
-         _build_pipeline(url, False, "udp", vcodec)),
-    ]
-
-    working_idx = None
-    hard_failed = set()
-
-    try:
-        while True:
-            if working_idx is not None:
-                label, cmd = variants[working_idx]
-                status, dur = _run_gstreamer(cmd, label)
-                if status == "interrupt":
-                    print("\n[*] Stopped.")
-                    return
-                if status == "ok":
-                    print(f"[*] Stream dropped after {dur:.1f}s. "
-                          f"Reconnecting with {label}...")
-                    time.sleep(2)
-                    continue
-                if status == "hardfail":
-                    print(f"[!] {label} hard-failed, URL/path is bad.")
-                    hard_failed.add(working_idx)
-                    working_idx = None
-                    continue
-                print(f"[!] {label} failed in {dur:.1f}s, "
-                      f"re-testing all variants.")
-                working_idx = None
-                continue
-
-            print("[*] Finding a working player variant...")
-            for i, (label, cmd) in enumerate(variants):
-                if i in hard_failed:
-                    print(f"[*] Skipping {label} (hard-failed earlier)")
-                    continue
-                status, dur = _run_gstreamer(cmd, label)
-                if status == "interrupt":
-                    print("\n[*] Stopped.")
-                    return
-                if status == "ok":
-                    working_idx = i
-                    print(f"[+] {label} works. Streaming live.")
-                    break
-                if status == "hardfail":
-                    hard_failed.add(i)
-                    print(f"[*] {label} hard-failed, skipping in future.")
-                    continue
-                print(f"[*] {label} failed in {dur:.1f}s.")
-
-            if working_idx is None:
-                if len(hard_failed) == len(variants):
-                    print("[!] Every variant hard-failed. The path "
-                          f"'{path}' is not usable on this camera.")
-                    print("[!] Returning to menu, try a different path.")
-                    return
-                print("[!] No variant survived "
-                      f"{STABILITY_GRACE:.0f}s. Retrying in 3s...")
-                time.sleep(3)
-
-    except KeyboardInterrupt:
-        print("\n[*] Stopped.")
+        if status == "ok":
+            print(f"[*] Stream ended after {dur:.1f}s. Reconnecting...")
+            time.sleep(2)
+            continue
+        print(f"[!] Player exited with status {status} after {dur:.1f}s.")
+        print("[!] Returning to menu.")
+        return
 
 
-# ---------------------------------------------------------------------------
+
 # Menu helpers
-# ---------------------------------------------------------------------------
+
 def try_paths(ip, paths):
     for path in paths:
         answer = input(f"[?] Try {path}? [Y/n/q] ").strip().lower()
@@ -1229,37 +978,15 @@ def _try_vendor_variants(ip, vendor, detected_vcodec=None):
     return False
 
 
-# ---------------------------------------------------------------------------
+
 # Vendor detection
-# ---------------------------------------------------------------------------
+
 def _match_vendor(text):
     lowered = text.lower()
     for keyword, vendor in VENDOR_KEYWORDS:
         if keyword in lowered:
             return vendor
     return None
-
-
-def detect_vendor(ip, timeout=120):
-    print(f"[*] Running nmap version scan (may take up to {timeout}s)...")
-    try:
-        result = subprocess.run(
-            ["nmap", "-sV", "-p", "554", "--version-all", ip],
-            capture_output=True, text=True, timeout=timeout,
-        )
-    except FileNotFoundError:
-        print("[!] nmap not found.")
-        return probe_rtsp_banner(ip)
-    except subprocess.TimeoutExpired:
-        print("[!] nmap timed out. Falling back to RTSP banner probe.")
-        return probe_rtsp_banner(ip)
-
-    print(result.stdout)
-    vendor = _match_vendor(result.stdout)
-    if vendor:
-        print(f"[+] Detected vendor from nmap: {vendor}")
-        return vendor
-    return probe_rtsp_banner(ip)
 
 
 def probe_rtsp_banner(ip):
@@ -1289,12 +1016,12 @@ def list_vendors():
     return vendors
 
 
-# ---------------------------------------------------------------------------
+
 # Menu
-# ---------------------------------------------------------------------------
+
 def menu(ip, detected_path=None, detected_has_audio=False, detected_vcodec=None):
     while True:
-        print("\n=== RTSP Camera Viewer ===")
+        print("\n=== RTSP Camera Viewer (Android) ===")
         print(f"Target: {ip}")
         print(f"Backend: {PLAYER_BACKEND}")
 
@@ -1309,13 +1036,14 @@ def menu(ip, detected_path=None, detected_has_audio=False, detected_vcodec=None)
             ))
         options.extend([
             ("I know the vendor", "vendor"),
-            ("Auto-detect vendor (nmap -sV)", "auto"),
+            ("Probe RTSP banner (vendor hint)", "banner"),
             ("Try common paths blindly", "blind"),
             ("Enter a custom RTSP path", "custom"),
             ("Change target IP", "change_ip"),
             ("Check speaker (ONVIF backchannel)", "check_speaker"),
             ("Re-check mic on current IP", "recheck"),
             ("Re-check with verbose path output", "recheck_verbose"),
+            ("Restart X11 viewer", "restart_x11"),
             ("Quit", "quit"),
         ])
 
@@ -1354,8 +1082,8 @@ def menu(ip, detected_path=None, detected_has_audio=False, detected_vcodec=None)
                 play(ip, VENDOR_PATHS[vkey],
                      has_audio=True, vcodec=detected_vcodec)
 
-        elif action == "auto":
-            vendor = detect_vendor(ip)
+        elif action == "banner":
+            vendor = probe_rtsp_banner(ip)
             if vendor:
                 if not _try_vendor_variants(ip, vendor, detected_vcodec):
                     print("[*] Falling back to blind path trial.")
@@ -1399,24 +1127,35 @@ def menu(ip, detected_path=None, detected_has_audio=False, detected_vcodec=None)
             detected_path, detected_has_audio, detected_vcodec = report_mic(
                 ip, verbose=True)
 
+        elif action == "restart_x11":
+            print("[*] Restarting Termux:X11...")
+            _kill_x11()
+            _clean_x11_sockets()
+            if _start_x11():
+                print("[+] Viewer restarted. Try playing again.")
+            else:
+                print("[!] Restart failed. Open the Termux:X11 app and retry.")
+
         elif action == "quit":
             print("Bye.")
             return
 
 
-# ---------------------------------------------------------------------------
+
 # Main
-# ---------------------------------------------------------------------------
+
 def main():
     ensure_player_available()
 
-    if IS_TERMUX:
-        print(f"[*] Termux detected. Backend: {PLAYER_BACKEND}")
-        print(f"[*] X11 display: {X11_DISPLAY}")
-        print(f"[*] XDG_RUNTIME_DIR: {os.environ.get('XDG_RUNTIME_DIR')}")
-        print("[*] Make sure the Termux:X11 app is installed and ready.")
-    else:
-        print(f"[*] Desktop Linux. Backend: {PLAYER_BACKEND}")
+    print(f"[*] Termux detected. Backend: {PLAYER_BACKEND}")
+    print(f"[*] X11 display: {X11_DISPLAY}")
+    print(f"[*] XDG_RUNTIME_DIR: {os.environ.get('XDG_RUNTIME_DIR')}")
+    print(f"[*] mpv log: {_mpv_log_path()}")
+    print()
+    print("[!] The Termux:X11 app must be OPEN before starting playback.")
+    print("[!] If it is not open, the screen will stay black.")
+    print("[*] Open Termux:X11 now, leave it running, then continue.")
+    print()
 
     while True:
         ip = input("Enter IP: ").strip()
