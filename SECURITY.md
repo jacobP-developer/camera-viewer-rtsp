@@ -1,5 +1,8 @@
 # Security Policy
 
+### Use this tool at your own risk
+You acknowledge and agree that your use of this software is at your sole risk and that you assume full responsibility for any and all consequences, damages, or legal liabilities that may arise from your use of the software
+
 **⚠️ LEGAL WARNING**
 This tool is intended **only** for use on your own network and on
 devices you own or have explicit, written permission to test.
@@ -66,7 +69,7 @@ This tool is designed for **authorized testing and personal use only**. To use i
    Use `.gitignore` to exclude `.env`, `config.ini`, `*.log`, and similar files.
 
 5. **Enable the approval gate.**
-   `connect.py` will not run unless `APPROVED = True` is set. Read this document before enabling it.
+   On Linux, `linux/connect.py` will not run unless `APPROVED = True` is set.
 
 6. **Keep dependencies up to date.**
    Regularly update GStreamer, `nmap`, and Python to their latest stable versions.
@@ -80,7 +83,6 @@ This tool is designed for **authorized testing and personal use only**. To use i
 ## Known Security Considerations
 
 - The tool probes port 554 and attempts to connect to RTSP streams. This activity may be logged by network monitoring systems.
-- The path lists in `connect.py` may include placeholders for default credentials. **These are not real credentials** but are well-known defaults used by many cameras. Before publishing, ensure they are removed or replaced with user-supplied input.
 - The tool does not encrypt or store any credentials; they are passed directly to GStreamer. Ensure your local environment is secure.
 - No authentication, authorization, or access control is performed by this tool. It is a viewer and diagnostic utility, not a hardened service.
 

@@ -40,7 +40,6 @@ pkg install xorg-xdpyinfo -y
 ### 1. Clone the repo
 ```bash
 git clone https://github.com/jacobP-cyberdev/rtsp-camera-viewer.git
-cd rtsp-camera-viewer/android
 ```
 Go to the directory 
 ```bash
@@ -58,7 +57,15 @@ python3 connect.py
 
 ### Help
 If the X11 player is ever showing a black screen, you most likely need to refresh it.
+X11 app > Force Stop
 
-```bash
+## Prohibited Uses
 
-```
+You may not use this tool to access devices, networks, or camera systems
+without explicit, written authorization from the owner. You may not use
+it for unauthorized surveillance, harassment, or any illegal activity.
+
+## License
+
+This project is licensed under the Apache License 2.0.
+See [../LICENSE](../LICENSE) and [../NOTICE.md](../NOTICE.md)

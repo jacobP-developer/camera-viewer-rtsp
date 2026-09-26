@@ -25,8 +25,8 @@ precise for some camera models.
 
 | Platform | Guide | Player |
 |---|---|---|
-| Linux | [linux/README.md](linux/README.md) | GStreamer |
-| Android | [android/README.md](android/README.md) | mpv in Termux:X11 |
+| Linux | [linux/LINUX.md](linux/LINUX.md) | GStreamer |
+| Android | [android/ANDROID.md](android/ANDROID.md) | mpv in Termux:X11 |
 
 Both platforms share the same `camera.py`. The script detects the
 platform at runtime and selects the correct backend automatically. There
@@ -66,7 +66,6 @@ larger fallback list only if needed.
 ## Security and Legal
 
 - Use only on networks and devices you own or have explicit permission to test.
-- Do not commit real credentials, API keys, or personal data.
 - The path library uses `{password}` placeholders. Fill them at runtime, not in the source file.
 - See [SECURITY.md](SECURITY.md) for the security policy and vulnerability reporting process.
 
@@ -74,7 +73,16 @@ larger fallback list only if needed.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+This project is licensed under the Apache License 2.0.
+See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md) for details.
+
+---
+
+## Prohibited Uses
+
+You may not use this tool to access devices, networks, or camera systems
+without explicit, written authorization from the owner. You may not use
+it for unauthorized surveillance, harassment, or any illegal activity.
 
 ---
 

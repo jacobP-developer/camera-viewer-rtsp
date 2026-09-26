@@ -45,3 +45,14 @@ cd rtsp-camera-viewer/linux
 
 **python3 connect.py**
 You will be prompted for an IP address. Once given, the tool will then automatically find a working RTSP path
+
+## Prohibited Uses
+
+You may not use this tool to access devices, networks, or camera systems
+without explicit, written authorization from the owner. You may not use
+it for unauthorized surveillance, harassment, or any illegal activity.
+
+## License
+
+This project is licensed under the Apache License 2.0.
+See [../LICENSE](../LICENSE) and [../NOTICE.md](../NOTICE.md)
