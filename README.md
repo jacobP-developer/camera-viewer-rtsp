@@ -66,7 +66,7 @@ larger fallback list only if needed.
 ## Security and Legal
 
 - Use only on networks and devices you own or have explicit permission to test.
-- The path library uses `{password}` placeholders. Fill them at runtime, not in the source file.
+- The path library uses `PRIORITY_PATHS` placeholders. This json has the majority of all **publicly available paths**
 - See [SECURITY.md](SECURITY.md) for the security policy and vulnerability reporting process.
 
 ---
